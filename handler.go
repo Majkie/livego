@@ -42,6 +42,10 @@ func (h *Handler) RegisterStore(key string, factory StoreFactory) {
 	h.stores[key] = factory
 }
 
+func (h *Handler) InitializeStreaming() *StreamManager {
+	return NewStreamManager(h.secret)
+}
+
 // createComponent instantiates a component by name
 func (h *Handler) createComponent(ctx context.Context, name string) Component {
 	factory, exists := h.components[name]
@@ -553,6 +557,91 @@ func (h *Handler) HandlePageUpdate(w http.ResponseWriter, r *http.Request) {
 		Components: responseSnapshots,
 		Global:     globalState,
 	})
+}
+
+func (h *Handler) HandleStreamedUpdate(streamManager *StreamManager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req UpdateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			writeBadRequestError(w, "Invalid request", map[string]interface{}{
+				"parse_error": err.Error(),
+			})
+			return
+		}
+
+		// Verify checksum
+		if !verifyChecksum(h.secret, req.Snapshot) {
+			writeComponentError(w, ErrorChecksumMismatch, "Checksum mismatch", http.StatusForbidden, nil)
+			return
+		}
+
+		// Create component & hydrate
+		component := h.createComponent(r.Context(), req.Snapshot.Memo.Name)
+		if component == nil {
+			writeComponentError(w, ErrorComponentNotFound, "Component not found", http.StatusNotFound, nil)
+			return
+		}
+		component.SetID(req.Snapshot.Memo.ID)
+
+		if err := HydrateComponent(component, req.Snapshot.State); err != nil {
+			writeComponentError(w, ErrorComponentHydration, "Hydration failed", http.StatusInternalServerError, nil)
+			return
+		}
+
+		// Execute updates
+		effects := &Effects{
+			Dirty:      []string{},
+			Dispatches: []map[string]interface{}{},
+		}
+
+		for _, update := range req.Updates {
+			if authComponent, ok := component.(UpdateAuthorizer); ok {
+				if err := authComponent.AuthorizeUpdate(r.Context(), update.Type, update.Payload); err != nil {
+					writeUnauthorizedError(w, "Unauthorized: "+err.Error(), nil)
+					return
+				}
+			}
+
+			if err := h.executeUpdate(component, update, effects); err != nil {
+				writeComponentError(w, ErrorComponentUpdate, err.Error(), http.StatusBadRequest, nil)
+				return
+			}
+		}
+
+		// Check if component supports streaming
+		if streamComp, ok := component.(StreamComponent); ok {
+			streamCtx := &StreamContext{
+				componentID: component.GetID(),
+				manager:     streamManager,
+				ctx:         r.Context(),
+			}
+
+			// Trigger streaming (async)
+			go func() {
+				if err := streamComp.OnStream(streamCtx); err != nil {
+					// Log error but don't fail the request
+					fmt.Printf("Stream error: %v\n", err)
+				}
+			}()
+		}
+
+		// Return normal update response with stream signature
+		newSnapshot := h.createSnapshot(component, req.Snapshot.Memo)
+		streamSignature := streamManager.GenerateStreamSignature(component.GetID())
+
+		response := struct {
+			Snapshot        ComponentSnapshot `json:"snapshot"`
+			Effects         Effects           `json:"effects"`
+			StreamSignature string            `json:"stream_signature,omitempty"`
+		}{
+			Snapshot:        newSnapshot,
+			Effects:         *effects,
+			StreamSignature: streamSignature,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}
 }
 
 // Helper methods

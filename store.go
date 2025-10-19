@@ -1,10 +1,23 @@
 package livego
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
 )
+
+type BaseStore struct {
+	key string
+}
+
+func (b *BaseStore) Key() string {
+	return b.key
+}
+
+func (b *BaseStore) Authorize(ctx context.Context) error {
+	return nil // Default: allow all
+}
 
 func (h *Handler) HandleStoreLoad(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

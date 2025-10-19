@@ -1,7 +1,6 @@
 package livego
 
 import (
-	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -51,19 +50,6 @@ func (b *BaseComponent) Dehydrate() map[string]interface{} {
 	}
 
 	return result
-}
-
-// BaseStore provides common functionality for stores
-type BaseStore struct {
-	key string
-}
-
-func (b *BaseStore) Key() string {
-	return b.key
-}
-
-func (b *BaseStore) Authorize(ctx context.Context) error {
-	return nil // Default: allow all
 }
 
 // Component utility functions
